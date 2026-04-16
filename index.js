@@ -33,8 +33,8 @@ const pool = new Pool({
   ssl: DATABASE_URL ? { rejectUnauthorized: false } : false,
 });
 
-function jsonError(res, status, message) {
-  return res.status(status).json({ ok: false, error: message });
+function jsonError(res, status, message, extra = {}) {
+  return res.status(status).json({ ok: false, error: message, ...extra });
 }
 
 async function getIntegration(provider = "todoist") {
@@ -64,35 +64,18 @@ async function upsertIntegration({ provider = "todoist", access_token, token_typ
   return result.rows[0];
 }
 
-async function todoistApi(path, options = {}) {
-  const integration = await getIntegration("todoist");
-  if (!integration?.access_token) throw new Error("Todoist is not connected yet");
-
-  const response = await fetch(`https://api.todoist.com${path}`, {
-    method: options.method || "GET",
-    headers: {
-      Authorization: `Bearer ${integration.access_token}`,
-      "Content-Type": "application/json",
-      ...(options.headers || {})
-    },
-    body: options.body ? JSON.stringify(options.body) : undefined
-  });
-
-  const text = await response.text();
-  let data = null;
-  try { data = text ? JSON.parse(text) : null; } catch { data = text; }
-
-  return { ok: response.ok, status: response.status, data };
-}
-
 function verifyTodoistWebhook(rawBody, signatureHeader, secret) {
   if (!rawBody || !signatureHeader || !secret) return false;
   const computed = crypto.createHmac("sha256", secret).update(rawBody).digest("base64");
-  return crypto.timingSafeEqual(Buffer.from(computed), Buffer.from(signatureHeader));
+  try {
+    return crypto.timingSafeEqual(Buffer.from(computed), Buffer.from(signatureHeader));
+  } catch {
+    return false;
+  }
 }
 
 app.get("/", async (_req, res) => {
-  res.json({ ok: true, service: "CerebroTasks Server", version: "1.2.0" });
+  res.json({ ok: true, service: "CerebroTasks Server", version: "1.2.1" });
 });
 
 app.get("/health", async (_req, res) => {
@@ -205,18 +188,28 @@ app.get("/todoist/connect", async (_req, res) => {
     redirect_uri: redirectUri
   });
 
-  res.redirect(`https://todoist.com/oauth/authorize?${params.toString()}`);
+  // Correct Todoist authorize host
+  res.redirect(`https://app.todoist.com/oauth/authorize?${params.toString()}`);
 });
 
 app.get("/todoist/callback", async (req, res) => {
-  const { code } = req.query;
-  if (!code) return jsonError(res, 400, "Missing Todoist OAuth code");
+  const { code, error } = req.query;
+
+  if (error) {
+    return jsonError(res, 400, `Todoist OAuth error: ${error}`);
+  }
+
+  if (!code) {
+    return jsonError(res, 400, "Missing Todoist OAuth code");
+  }
+
   if (!TODOIST_CLIENT_ID || !TODOIST_CLIENT_SECRET || !APP_BASE_URL) {
     return jsonError(res, 500, "Missing Todoist app environment variables");
   }
 
   try {
     const redirectUri = `${APP_BASE_URL}/todoist/callback`;
+
     const tokenResponse = await fetch("https://todoist.com/oauth/access_token", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -229,9 +222,10 @@ app.get("/todoist/callback", async (req, res) => {
     });
 
     const tokenData = await tokenResponse.json();
+
     if (!tokenResponse.ok || !tokenData.access_token) {
       console.error("Todoist token exchange failed:", tokenData);
-      return jsonError(res, 500, "Todoist token exchange failed");
+      return jsonError(res, 500, "Todoist token exchange failed", { details: tokenData });
     }
 
     await upsertIntegration({
@@ -243,8 +237,8 @@ app.get("/todoist/callback", async (req, res) => {
     });
 
     res.json({ ok: true, message: "Todoist connected successfully" });
-  } catch (error) {
-    console.error("Todoist callback error:", error);
+  } catch (err) {
+    console.error("Todoist callback error:", err);
     jsonError(res, 500, "Failed to complete Todoist OAuth");
   }
 });
@@ -290,8 +284,34 @@ app.post("/todoist/webhook", async (req, res) => {
         await pool.query(
           "UPDATE tasks SET title = COALESCE($1, title), last_changed_by = 'todoist', updated_at = NOW() WHERE id = $2",
           [eventData.content || null, taskId]
-        )
+        );
       }
+
+      if (eventName === "item:completed") {
+        await pool.query(
+          "UPDATE tasks SET completed = TRUE, last_changed_by = 'todoist', updated_at = NOW() WHERE id = $1",
+          [taskId]
+        );
+      }
+
+      if (eventName === "item:uncompleted") {
+        await pool.query(
+          "UPDATE tasks SET completed = FALSE, last_changed_by = 'todoist', updated_at = NOW() WHERE id = $1",
+          [taskId]
+        );
+      }
+
+      if (eventName === "item:deleted") {
+        await pool.query(
+          "UPDATE tasks SET deleted = TRUE, last_changed_by = 'todoist', updated_at = NOW() WHERE id = $1",
+          [taskId]
+        );
+      }
+
+      await pool.query(
+        "INSERT INTO task_events (task_id, source, event_type, payload) VALUES ($1, 'todoist', $2, $3)",
+        [taskId, eventName, payload]
+      );
     }
 
     res.status(200).json({ ok: true, event: eventName });
