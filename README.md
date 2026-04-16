@@ -1,19 +1,19 @@
-# CerebroTasks Server
+# CerebroTasks Server v1.2
 
-Small starter backend for Railway.
+This build adds the first Todoist connection layer.
 
-## Files
-- `index.js` - Express server
-- `package.json` - dependencies
-- `.env.example` - example environment variables
+## New routes
+- GET /todoist/status
+- GET /todoist/connect
+- GET /todoist/callback
+- POST /todoist/webhook
+- GET /obsidian/changes
 
-## Local run
-1. `npm install`
-2. set `DATABASE_URL`
-3. `npm start`
+## New table
+- integrations
 
-## Routes
-- `GET /`
-- `GET /health`
-- `GET /setup`
-- `POST /obsidian/task-change`
+## Required Railway variables
+- DATABASE_URL
+- APP_BASE_URL
+- TODOIST_CLIENT_ID
+- TODOIST_CLIENT_SECRET
