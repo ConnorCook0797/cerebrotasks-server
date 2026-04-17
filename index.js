@@ -64,6 +64,39 @@ async function upsertIntegration({ provider = "todoist", access_token, token_typ
   return result.rows[0];
 }
 
+async function createTodoistTask(content) {
+  const integration = await getIntegration("todoist");
+  if (!integration?.access_token) {
+    throw new Error("Todoist is not connected yet");
+  }
+
+  const response = await fetch("https://api.todoist.com/rest/v2/tasks", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${integration.access_token}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      content
+    })
+  });
+
+  const text = await response.text();
+  let data = null;
+
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    data = text;
+  }
+
+  return {
+    ok: response.ok,
+    status: response.status,
+    data
+  };
+}
+
 function verifyTodoistWebhook(rawBody, signatureHeader, secret) {
   if (!rawBody || !signatureHeader || !secret) return false;
   const computed = crypto.createHmac("sha256", secret).update(rawBody).digest("base64");
@@ -188,7 +221,6 @@ app.get("/todoist/connect", async (_req, res) => {
     redirect_uri: redirectUri
   });
 
-  // Correct Todoist authorize host
   res.redirect(`https://app.todoist.com/oauth/authorize?${params.toString()}`);
 });
 
@@ -240,6 +272,60 @@ app.get("/todoist/callback", async (req, res) => {
   } catch (err) {
     console.error("Todoist callback error:", err);
     jsonError(res, 500, "Failed to complete Todoist OAuth");
+  }
+});
+
+app.post("/todoist/create-task", async (req, res) => {
+  const { title, completed = false } = req.body;
+
+  if (!title) {
+    return jsonError(res, 400, "Missing title");
+  }
+
+  try {
+    const todoistResult = await createTodoistTask(title);
+
+    if (!todoistResult.ok || !todoistResult.data?.id) {
+      return jsonError(res, 500, "Todoist task creation failed", {
+        details: todoistResult.data
+      });
+    }
+
+    const insertedTask = await pool.query(
+      `
+      INSERT INTO tasks (title, completed, deleted, origin, last_changed_by)
+      VALUES ($1, $2, FALSE, 'server', 'server')
+      RETURNING *
+      `,
+      [title, completed]
+    );
+
+    const task = insertedTask.rows[0];
+
+    await pool.query(
+      `
+      INSERT INTO task_links (task_id, source_type, external_id)
+      VALUES ($1, 'todoist', $2)
+      `,
+      [task.id, String(todoistResult.data.id)]
+    );
+
+    await pool.query(
+      `
+      INSERT INTO task_events (task_id, source, event_type, payload)
+      VALUES ($1, 'server', 'todoist_task_created', $2)
+      `,
+      [task.id, { todoist: todoistResult.data }]
+    );
+
+    res.json({
+      ok: true,
+      task,
+      todoist_task: todoistResult.data
+    });
+  } catch (error) {
+    console.error("Create Todoist task error:", error);
+    jsonError(res, 500, "Failed to create Todoist task");
   }
 });
 
