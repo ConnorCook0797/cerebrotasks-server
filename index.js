@@ -71,8 +71,8 @@ async function createTodoistTask(content) {
     throw new Error("Todoist is not connected yet");
   }
 
-  // Use the correct Todoist v2 REST API endpoint
-  const response = await fetch("https://api.todoist.com/rest/v2/tasks", {
+  // Use the correct Todoist v1 REST API endpoint
+  const response = await fetch("https://api.todoist.com/api/v1/tasks", {
     method: "POST",
     headers: {
       Authorization: `Bearer ${integration.access_token}`,
