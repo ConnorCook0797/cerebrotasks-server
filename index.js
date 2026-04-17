@@ -526,6 +526,7 @@ async function fetchAllTodoistTasks() {
   }
 
   const data = await response.json();
+  console.log("[SYNC] Todoist API raw response:", JSON.stringify(data).substring(0, 500));
   // Todoist returns { items: [...] } or just [...] depending on endpoint
   return Array.isArray(data) ? data : (data.items || []);
 }
