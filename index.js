@@ -183,7 +183,7 @@ app.get("/todoist/connect", async (_req, res) => {
   const state = crypto.randomBytes(16).toString("hex");
   const params = new URLSearchParams({
     client_id: TODOIST_CLIENT_ID,
-    scope: "data:read_write,data:delete,project:read",
+    scope: "data:read_write,data:delete",
     state,
     redirect_uri: redirectUri
   });
