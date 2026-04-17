@@ -529,6 +529,96 @@ async function fetchAllTodoistTasks() {
 }
 
 // Sync endpoint: bidirectional sync between server and Todoist
+// GET handler for manual sync (easier to trigger from browser)
+app.get("/todoist/sync", async (req, res) => {
+  try {
+    console.log("[SYNC] Starting manual sync (GET)...");
+    const integration = await getIntegration("todoist");
+    if (!integration?.access_token) {
+      console.log("[SYNC] Todoist not connected");
+      return jsonError(res, 400, "Todoist is not connected");
+    }
+
+    const todoistTasks = await fetchAllTodoistTasks();
+    console.log(`[SYNC] Fetched ${todoistTasks.length} tasks from Todoist`);
+
+    const serverTasksResult = await pool.query(`
+      SELECT t.*, tl.external_id as todoist_id
+      FROM tasks t
+      LEFT JOIN task_links tl ON t.id = tl.task_id AND tl.source_type = 'todoist'
+      WHERE t.deleted = FALSE
+    `);
+    console.log(`[SYNC] Fetched ${serverTasksResult.rows.length} tasks from server`);
+
+    const linkedServerTasks = serverTasksResult.rows.filter(t => t.todoist_id);
+    const tasksToPush = serverTasksResult.rows.filter(t => !t.todoist_id);
+    const pushedTasks = [];
+    console.log(`[SYNC] Tasks to push to Todoist: ${tasksToPush.length}`);
+
+    for (const task of tasksToPush) {
+      const result = await createTodoistTask(task.title);
+      if (result.ok && result.data?.id) {
+        await pool.query(
+          "INSERT INTO task_links (task_id, source_type, external_id) VALUES ($1, 'todoist', $2)",
+          [task.id, String(result.data.id)]
+        );
+        await pool.query(
+          "INSERT INTO task_events (task_id, source, event_type, payload) VALUES ($1, 'server', 'synced_to_todoist', $2)",
+          [task.id, { todoist_id: result.data.id }]
+        );
+        pushedTasks.push({ serverTask: task, todoistTask: result.data });
+        console.log(`[SYNC] Pushed server task '${task.title}' to Todoist as ID ${result.data.id}`);
+      } else {
+        console.log(`[SYNC] Failed to push server task '${task.title}' to Todoist`, result);
+      }
+    }
+
+    const linkedTodoistIds = new Set(linkedServerTasks.map(t => t.todoist_id));
+    const tasksToPull = todoistTasks.filter(t => !linkedTodoistIds.has(String(t.id)));
+    const pulledTasks = [];
+    console.log(`[SYNC] Tasks to pull from Todoist: ${tasksToPull.length}`);
+
+    for (const todoistTask of tasksToPull) {
+      try {
+        const inserted = await pool.query(
+          "INSERT INTO tasks (title, completed, deleted, origin, last_changed_by) VALUES ($1, $2, FALSE, 'todoist', 'sync') RETURNING *",
+          [todoistTask.content || "Untitled Task", todoistTask.is_completed || false]
+        );
+        const newTask = inserted.rows[0];
+
+        await pool.query(
+          "INSERT INTO task_links (task_id, source_type, external_id) VALUES ($1, 'todoist', $2)",
+          [newTask.id, String(todoistTask.id)]
+        );
+        await pool.query(
+          "INSERT INTO task_events (task_id, source, event_type, payload) VALUES ($1, 'server', 'synced_from_todoist', $2)",
+          [newTask.id, { todoist_task: todoistTask }]
+        );
+        pulledTasks.push({ serverTask: newTask, todoistTask });
+        console.log(`[SYNC] Pulled Todoist task '${todoistTask.content}' into server as ID ${newTask.id}`);
+      } catch (err) {
+        console.log(`[SYNC] Failed to pull Todoist task '${todoistTask.content}':`, err.message);
+      }
+    }
+
+    res.json({
+      ok: true,
+      summary: {
+        serverTasks: serverTasksResult.rows.length,
+        todoistTasks: todoistTasks.length,
+        pushed: pushedTasks.length,
+        pulled: pulledTasks.length
+      },
+      pushedTasks,
+      pulledTasks
+    });
+    console.log(`[SYNC] Done. Pushed: ${pushedTasks.length}, Pulled: ${pulledTasks.length}`);
+  } catch (error) {
+    console.error("[SYNC] Todoist sync error:", error);
+    jsonError(res, 500, "Failed to sync with Todoist", { details: error.message });
+  }
+});
+
 app.post("/todoist/sync", async (req, res) => {
   try {
     console.log("[SYNC] Starting manual sync...");
