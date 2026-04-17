@@ -140,6 +140,10 @@ app.get("/setup", async (_req, res) => {
       );
     `);
 
+    // Add missing columns to existing tables
+    await pool.query(`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS origin TEXT NOT NULL DEFAULT 'server';`).catch(() => {});
+    await pool.query(`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS last_changed_by TEXT NOT NULL DEFAULT 'server';`).catch(() => {});
+
     await pool.query(`
       CREATE TABLE IF NOT EXISTS task_links (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -154,6 +158,7 @@ app.get("/setup", async (_req, res) => {
         UNIQUE (source_type, obsidian_note_path, obsidian_task_key)
       );
     `);
+    
 
     await pool.query(`
       CREATE TABLE IF NOT EXISTS task_events (
