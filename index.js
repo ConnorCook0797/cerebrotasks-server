@@ -70,7 +70,7 @@ async function createTodoistTask(content) {
     throw new Error("Todoist is not connected yet");
   }
 
-  const response = await fetch("https://api.todoist.com/rest/v2/tasks", {
+  const response = await fetch("https://api.todoist.com/api/v1/tasks", {
     method: "POST",
     headers: {
       Authorization: `Bearer ${integration.access_token}`,
