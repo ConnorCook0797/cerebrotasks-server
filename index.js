@@ -325,7 +325,13 @@ app.post("/todoist/create-task", async (req, res) => {
     });
   } catch (error) {
     console.error("Create Todoist task error:", error);
-    jsonError(res, 500, "Failed to create Todoist task");
+
+    return res.status(500).json({
+      ok: false,
+      error: "Failed to create Todoist task",
+      details: error?.message || String(error),
+      stack: error?.stack || null
+    });
   }
 });
 
