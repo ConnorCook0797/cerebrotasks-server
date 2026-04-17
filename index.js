@@ -210,7 +210,7 @@ app.get("/todoist/callback", async (req, res) => {
   try {
     const redirectUri = `${APP_BASE_URL}/todoist/callback`;
 
-    const tokenResponse = await fetch("https://todoist.com/oauth/access_token", {
+    const tokenResponse = await fetch("https://api.todoist.com/oauth/access_token", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
