@@ -71,7 +71,8 @@ async function createTodoistTask(content) {
     throw new Error("Todoist is not connected yet");
   }
 
-  const response = await fetch("https://api.todoist.com/api/v1/tasks", {
+  // Use the correct Todoist v2 REST API endpoint
+  const response = await fetch("https://api.todoist.com/rest/v2/tasks", {
     method: "POST",
     headers: {
       Authorization: `Bearer ${integration.access_token}`,
@@ -82,13 +83,18 @@ async function createTodoistTask(content) {
     })
   });
 
-  const text = await response.text();
   let data = null;
-
+  let text = null;
   try {
+    text = await response.text();
     data = text ? JSON.parse(text) : null;
-  } catch {
+  } catch (err) {
+    console.error("Failed to parse Todoist API response:", err, text);
     data = text;
+  }
+
+  if (!response.ok) {
+    console.error("Todoist API error:", response.status, data);
   }
 
   return {
@@ -488,11 +494,26 @@ app.post("/obsidian/task-change", async (req, res) => {
 
 app.get("/tasks", async (_req, res) => {
   try {
-    const result = await pool.query("SELECT * FROM tasks ORDER BY created_at DESC");
+    const result = await pool.query(`
+      SELECT t.*, tl.source_type, tl.external_id, tl.obsidian_note_path, tl.obsidian_task_key
+      FROM tasks t
+      LEFT JOIN task_links tl ON t.id = tl.task_id
+      ORDER BY t.created_at DESC
+    `);
     res.json({ ok: true, tasks: result.rows });
   } catch (error) {
     console.error("Get tasks error:", error);
     jsonError(res, 500, "Failed to fetch tasks");
+  }
+});
+
+app.get("/debug/task-links", async (_req, res) => {
+  try {
+    const result = await pool.query("SELECT * FROM task_links ORDER BY created_at DESC");
+    res.json({ ok: true, links: result.rows });
+  } catch (error) {
+    console.error("Get task links error:", error);
+    jsonError(res, 500, "Failed to fetch task links");
   }
 });
 
