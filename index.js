@@ -508,6 +508,107 @@ app.get("/obsidian/changes", async (req, res) => {
   }
 });
 
+// Helper: Fetch all active tasks from Todoist
+async function fetchAllTodoistTasks() {
+  const integration = await getIntegration("todoist");
+  if (!integration?.access_token) {
+    throw new Error("Todoist is not connected");
+  }
+
+  const response = await fetch("https://api.todoist.com/api/v1/tasks", {
+    headers: { Authorization: `Bearer ${integration.access_token}` }
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Failed to fetch Todoist tasks: ${text}`);
+  }
+
+  return response.json();
+}
+
+// Sync endpoint: bidirectional sync between server and Todoist
+app.post("/todoist/sync", async (req, res) => {
+  try {
+    const integration = await getIntegration("todoist");
+    if (!integration?.access_token) {
+      return jsonError(res, 400, "Todoist is not connected");
+    }
+
+    // 1. Get all Todoist tasks
+    const todoistTasks = await fetchAllTodoistTasks();
+    const todoistTaskMap = new Map(todoistTasks.map(t => [String(t.id), t]));
+
+    // 2. Get all server tasks with their links
+    const serverTasksResult = await pool.query(`
+      SELECT t.*, tl.external_id as todoist_id
+      FROM tasks t
+      LEFT JOIN task_links tl ON t.id = tl.task_id AND tl.source_type = 'todoist'
+      WHERE t.deleted = FALSE
+    `);
+
+    const serverTaskMap = new Map(serverTasksResult.rows.map(t => [t.id, t]));
+    const linkedServerTasks = serverTasksResult.rows.filter(t => t.todoist_id);
+
+    // 3. Find server tasks NOT in Todoist (no external_id) - push to Todoist
+    const tasksToPush = serverTasksResult.rows.filter(t => !t.todoist_id);
+    const pushedTasks = [];
+
+    for (const task of tasksToPush) {
+      const result = await createTodoistTask(task.title);
+      if (result.ok && result.data?.id) {
+        await pool.query(
+          "INSERT INTO task_links (task_id, source_type, external_id) VALUES ($1, 'todoist', $2)",
+          [task.id, String(result.data.id)]
+        );
+        await pool.query(
+          "INSERT INTO task_events (task_id, source, event_type, payload) VALUES ($1, 'server', 'synced_to_todoist', $2)",
+          [task.id, { todoist_id: result.data.id }]
+        );
+        pushedTasks.push({ serverTask: task, todoistTask: result.data });
+      }
+    }
+
+    // 4. Find Todoist tasks NOT in server (no link) - pull to server
+    const linkedTodoistIds = new Set(linkedServerTasks.map(t => t.todoist_id));
+    const tasksToPull = todoistTasks.filter(t => !linkedTodoistIds.has(String(t.id)));
+    const pulledTasks = [];
+
+    for (const todoistTask of tasksToPull) {
+      const inserted = await pool.query(
+        "INSERT INTO tasks (title, completed, deleted, origin, last_changed_by) VALUES ($1, $2, FALSE, 'todoist', 'sync') RETURNING *",
+        [todoistTask.content || "Untitled Task", todoistTask.is_completed || false]
+      );
+      const newTask = inserted.rows[0];
+
+      await pool.query(
+        "INSERT INTO task_links (task_id, source_type, external_id) VALUES ($1, 'todoist', $2)",
+        [newTask.id, String(todoistTask.id)]
+      );
+      await pool.query(
+        "INSERT INTO task_events (task_id, source, event_type, payload) VALUES ($1, 'server', 'synced_from_todoist', $2)",
+        [newTask.id, { todoist_task: todoistTask }]
+      );
+      pulledTasks.push({ serverTask: newTask, todoistTask });
+    }
+
+    res.json({
+      ok: true,
+      summary: {
+        serverTasks: serverTasksResult.rows.length,
+        todoistTasks: todoistTasks.length,
+        pushed: pushedTasks.length,
+        pulled: pulledTasks.length
+      },
+      pushedTasks,
+      pulledTasks
+    });
+  } catch (error) {
+    console.error("Todoist sync error:", error);
+    jsonError(res, 500, "Failed to sync with Todoist", { details: error.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`CerebroTasks server running on port ${PORT}`);
 });
