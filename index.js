@@ -485,6 +485,16 @@ app.post("/obsidian/task-change", async (req, res) => {
   }
 });
 
+app.get("/tasks", async (_req, res) => {
+  try {
+    const result = await pool.query("SELECT * FROM tasks ORDER BY created_at DESC");
+    res.json({ ok: true, tasks: result.rows });
+  } catch (error) {
+    console.error("Get tasks error:", error);
+    jsonError(res, 500, "Failed to fetch tasks");
+  }
+});
+
 app.get("/obsidian/changes", async (req, res) => {
   const since = req.query.since || null;
   try {
