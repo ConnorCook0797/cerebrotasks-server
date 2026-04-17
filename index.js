@@ -525,7 +525,9 @@ async function fetchAllTodoistTasks() {
     throw new Error(`Failed to fetch Todoist tasks: ${text}`);
   }
 
-  return response.json();
+  const data = await response.json();
+  // Todoist returns { items: [...] } or just [...] depending on endpoint
+  return Array.isArray(data) ? data : (data.items || []);
 }
 
 // Sync endpoint: bidirectional sync between server and Todoist
