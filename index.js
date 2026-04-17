@@ -170,6 +170,17 @@ app.post("/todoist/full-sync", async (_req, res) => {
   }
 });
 
+// Debug endpoint to see raw Todoist tasks
+app.get("/debug/todoist-tasks", async (_req, res) => {
+  try {
+    const tasks = await fetchAllTodoistTasks();
+    res.json({ ok: true, count: tasks.length, tasks });
+  } catch (error) {
+    console.error("Debug Todoist tasks error:", error);
+    jsonError(res, 500, "Failed to fetch Todoist tasks", { details: error.message });
+  }
+});
+
 app.get("/", async (_req, res) => {
   res.json({ ok: true, service: "CerebroTasks Server", version: "1.2.1" });
 });
