@@ -27,6 +27,7 @@ const DATABASE_URL = process.env.DATABASE_URL;
 const APP_BASE_URL = process.env.APP_BASE_URL;
 const TODOIST_CLIENT_ID = process.env.TODOIST_CLIENT_ID;
 const TODOIST_CLIENT_SECRET = process.env.TODOIST_CLIENT_SECRET;
+const SYNC_INTERVAL_MS = parseInt(process.env.TODOIST_SYNC_INTERVAL_MS) || 0; // 0 = disabled
 
 const pool = new Pool({
   connectionString: DATABASE_URL,
@@ -608,6 +609,81 @@ app.post("/todoist/sync", async (req, res) => {
     jsonError(res, 500, "Failed to sync with Todoist", { details: error.message });
   }
 });
+
+// Auto-sync function
+async function runAutoSync() {
+  try {
+    const integration = await getIntegration("todoist");
+    if (!integration?.access_token) {
+      console.log("[Auto-sync] Todoist not connected, skipping");
+      return;
+    }
+
+    console.log("[Auto-sync] Running...");
+
+    const todoistTasks = await fetchAllTodoistTasks();
+    const todoistTaskMap = new Map(todoistTasks.map(t => [String(t.id), t]));
+
+    const serverTasksResult = await pool.query(`
+      SELECT t.*, tl.external_id as todoist_id
+      FROM tasks t
+      LEFT JOIN task_links tl ON t.id = tl.task_id AND tl.source_type = 'todoist'
+      WHERE t.deleted = FALSE
+    `);
+
+    const linkedServerTasks = serverTasksResult.rows.filter(t => t.todoist_id);
+    const tasksToPush = serverTasksResult.rows.filter(t => !t.todoist_id);
+    const linkedTodoistIds = new Set(linkedServerTasks.map(t => t.todoist_id));
+    const tasksToPull = todoistTasks.filter(t => !linkedTodoistIds.has(String(t.id)));
+
+    let pushed = 0, pulled = 0;
+
+    for (const task of tasksToPush) {
+      const result = await createTodoistTask(task.title);
+      if (result.ok && result.data?.id) {
+        await pool.query(
+          "INSERT INTO task_links (task_id, source_type, external_id) VALUES ($1, 'todoist', $2)",
+          [task.id, String(result.data.id)]
+        );
+        await pool.query(
+          "INSERT INTO task_events (task_id, source, event_type, payload) VALUES ($1, 'server', 'synced_to_todoist', $2)",
+          [task.id, { todoist_id: result.data.id, auto: true }]
+        );
+        pushed++;
+      }
+    }
+
+    for (const todoistTask of tasksToPull) {
+      const inserted = await pool.query(
+        "INSERT INTO tasks (title, completed, deleted, origin, last_changed_by) VALUES ($1, $2, FALSE, 'todoist', 'auto-sync') RETURNING *",
+        [todoistTask.content || "Untitled Task", todoistTask.is_completed || false]
+      );
+      const newTask = inserted.rows[0];
+      await pool.query(
+        "INSERT INTO task_links (task_id, source_type, external_id) VALUES ($1, 'todoist', $2)",
+        [newTask.id, String(todoistTask.id)]
+      );
+      await pool.query(
+        "INSERT INTO task_events (task_id, source, event_type, payload) VALUES ($1, 'server', 'synced_from_todoist', $2)",
+        [newTask.id, { todoist_task: todoistTask, auto: true }]
+      );
+      pulled++;
+    }
+
+    console.log(`[Auto-sync] Done: ${pushed} pushed, ${pulled} pulled`);
+  } catch (error) {
+    console.error("[Auto-sync] Error:", error.message);
+  }
+}
+
+// Start auto-sync if interval is configured
+if (SYNC_INTERVAL_MS > 0) {
+  console.log(`[Auto-sync] Enabled with interval: ${SYNC_INTERVAL_MS}ms`);
+  runAutoSync(); // Run immediately on startup
+  setInterval(runAutoSync, SYNC_INTERVAL_MS);
+} else {
+  console.log("[Auto-sync] Disabled (set TODOIST_SYNC_INTERVAL_MS to enable)");
+}
 
 app.listen(PORT, () => {
   console.log(`CerebroTasks server running on port ${PORT}`);
