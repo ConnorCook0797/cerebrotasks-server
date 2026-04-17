@@ -2,6 +2,7 @@ const express = require("express");
 const { Pool } = require("pg");
 const dotenv = require("dotenv");
 const crypto = require("crypto");
+const { v4: uuidv4 } = require("uuid");
 
 dotenv.config();
 
@@ -113,6 +114,61 @@ function verifyTodoistWebhook(rawBody, signatureHeader, secret) {
     return false;
   }
 }
+
+// Fetch all tasks from Todoist
+async function fetchAllTodoistTasks() {
+  const integration = await getIntegration("todoist");
+  if (!integration?.access_token) throw new Error("Todoist is not connected yet");
+  const response = await fetch("https://api.todoist.com/api/v1/tasks", {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${integration.access_token}`
+    }
+  });
+  if (!response.ok) throw new Error("Failed to fetch Todoist tasks");
+  return await response.json();
+}
+
+// Upsert a Todoist task into the server DB
+async function upsertTodoistTask(todoistTask) {
+  // Check if already linked
+  const link = await pool.query(
+    "SELECT task_id FROM task_links WHERE source_type = 'todoist' AND external_id = $1 LIMIT 1",
+    [String(todoistTask.id)]
+  );
+  let taskId = link.rows[0]?.task_id;
+  if (taskId) {
+    // Update existing
+    await pool.query(
+      `UPDATE tasks SET title = $1, completed = $2, deleted = FALSE, last_changed_by = 'todoist', updated_at = NOW() WHERE id = $3`,
+      [todoistTask.content, !!todoistTask.completed, taskId]
+    );
+  } else {
+    // Insert new
+    const inserted = await pool.query(
+      `INSERT INTO tasks (id, title, completed, deleted, origin, last_changed_by) VALUES ($1, $2, $3, FALSE, 'todoist', 'todoist') RETURNING *`,
+      [uuidv4(), todoistTask.content, !!todoistTask.completed]
+    );
+    taskId = inserted.rows[0].id;
+    await pool.query(
+      `INSERT INTO task_links (task_id, source_type, external_id) VALUES ($1, 'todoist', $2)`,
+      [taskId, String(todoistTask.id)]
+    );
+  }
+}
+
+app.post("/todoist/full-sync", async (_req, res) => {
+  try {
+    const todoistTasks = await fetchAllTodoistTasks();
+    for (const t of todoistTasks) {
+      await upsertTodoistTask(t);
+    }
+    res.json({ ok: true, count: todoistTasks.length });
+  } catch (error) {
+    console.error("Full sync error:", error);
+    jsonError(res, 500, "Failed to sync tasks", { details: error.message });
+  }
+});
 
 app.get("/", async (_req, res) => {
   res.json({ ok: true, service: "CerebroTasks Server", version: "1.2.1" });
